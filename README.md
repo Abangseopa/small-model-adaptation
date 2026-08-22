@@ -50,9 +50,9 @@ small-model-adaptation/
 └── README.md
 ```
 
-Each stage folder currently contains only stub functions that raise
-`NotImplementedError` — they exist to establish the shape of the
-pipeline before any real code is written.
+Stages 3-6 still contain only stub functions that raise
+`NotImplementedError`. `data_preparation/prepare_dataset.py` (Stage 2)
+is implemented — see below.
 
 `data/`, `models/`, and `reports/` hold generated or downloaded content
 (datasets, model weights, checkpoints, evaluation results). Their
@@ -72,10 +72,49 @@ No decision has been made to use either of these; they're noted here so
 later stages can reuse what's already local instead of downloading
 something new by default.
 
+## Dataset (Stage 2)
+
+`data_preparation/prepare_dataset.py` deterministically generates a small
+synthetic instruction-response dataset targeting **response behavior**,
+not factual recall. Every example asks a question against a supplied
+context and expects a fixed, machine-checkable output format:
+
+```
+ANSWER: <answer>
+CONFIDENCE: <HIGH|LOW>
+```
+
+`CONFIDENCE: HIGH` is used when the context supports the answer;
+`CONFIDENCE: LOW` (with a fixed "Insufficient information to answer."
+answer) is used when it does not — the model is meant to learn to say so
+rather than invent a plausible-sounding answer, even in cases where it
+may already "know" the real-world fact from pretraining.
+
+The dataset spans 6 subject domains (geography, astronomy, history,
+literature, sports, cooking) so the experiment can check whether the
+behavior generalizes across topics rather than being memorized wording
+in one domain. Each domain contributes disjoint subjects (and, for the
+test split, different question phrasing) to train vs. test, so the test
+set exercises genuinely novel content and wording rather than paraphrases
+of what was trained on.
+
+Run `python3 data_preparation/prepare_dataset.py` to regenerate and
+validate the dataset. It checks: required fields are present, no
+duplicate examples, zero train/test overlap (by prompt and by subject),
+every response matches the ANSWER/CONFIDENCE format, and both answerable
+and unanswerable examples exist in each split. Output is written to
+`data/processed/{train,test}.jsonl` plus a `dataset_info.json` summary
+(gitignored, regenerate locally as needed).
+
+Current dataset: 96 examples total — 72 train (36 answerable / 36
+unanswerable) and 24 held-out test (12 / 12), evenly split across the 6
+domains.
+
 ## Status
 
-**Step 1 / 8 — Architecture / project scaffolding: done.**
+**Step 2 / 8 — Dataset and training examples: done.**
 
-Nothing has been installed, downloaded, trained, or dataset-generated
-yet. `requirements.txt` lists intended dependencies but none are
-installed.
+Step 1 (scaffolding) and Step 2 (dataset) are complete. Nothing has
+been installed, downloaded, or trained yet — no model has been loaded,
+and no baseline evaluation has been run. `requirements.txt` lists
+intended dependencies but none are installed.
