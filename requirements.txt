@@ -1,23 +1,14 @@
 # Small Model Adaptation — dependencies
 #
-# Not installed yet (Step 1 is scaffolding only). Grouped by the pipeline
-# stage that will need them.
+# Exactly what the project code actually imports (verified by grep over
+# the whole repo). Not installed automatically — see README "Setup".
 
-# Stage 2-6: model loading, adaptation (LoRA), datasets
+# Stages 3-7: model/tokenizer loading, generation
 torch
 transformers
+
+# Stages 4, 5, 7: LoRA adapter training and loading
 peft
-datasets
-accelerate
 
-# Stage 3/6: evaluation metrics
-evaluate
-scikit-learn
-
-# General utilities
-numpy
-pandas
-tqdm
-
-# Stage 8: tests
+# Stage 8: automated test suite
 pytest

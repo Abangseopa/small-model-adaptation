@@ -14,16 +14,69 @@ behind a framework, so the whole process stays inspectable end to end.
 
 ## Pipeline
 
-The project is built in 8 stages:
+The project was built in 8 stages, each with its own plain script:
 
-1. **Architecture / project scaffolding** — project structure, directories, requirements, `.gitignore` (this step).
-2. **Dataset and training examples** — build the small custom dataset used for adaptation.
-3. **Base-model evaluation** — run the unmodified base model on the evaluation set and record its outputs.
-4. **Model adaptation / training** — fine-tune (adapt) the base model on the custom dataset.
-5. **Adapted-model inference** — run the adapted model on the same evaluation set.
-6. **Base vs adapted evaluation** — compare outputs from stage 3 and stage 5 side by side.
-7. **Analysis of what changed** — summarize and explain the measured differences.
-8. **Tests, documentation, and final wrap-up** — test coverage, docs, final report.
+1. **Architecture / scaffolding** — project structure, directories, requirements, `.gitignore`.
+2. **Dataset and training examples** — build the small synthetic behavioral dataset (72 train / 24 test).
+3. **Frozen base-model baseline** — run the unmodified base model on the 24 held-out examples, zero-shot.
+4. **LoRA adaptation / training** — fine-tune a small LoRA adapter on the 72 training examples; base weights frozen.
+5. **Held-out adapted-model evaluation** — run the adapted model on the same 24 examples, scored identically to Stage 3.
+6. **Base vs. adapted comparison** — read-only, per-example analysis of the two frozen result sets; what changed and why.
+7. **Local inference** — a reusable `AdaptedModel` class plus a CLI/interactive/demo tool for arbitrary context+question input.
+8. **Testing, documentation, and final wrap-up** — automated test suite, reproducibility check, final README (this stage).
+
+## Results at a glance
+
+| | Base model | Adapted model |
+|---|---|---|
+| Full-behavior success (24 held-out examples) | **0%** | **95.8%** (23/24) |
+
+- **23/24** held-out examples improved (failed baseline → passed adapted)
+- **1/24** unchanged failure (a semantic/question-interpretation gap, analyzed in Stage 6)
+- **0** regressions (nothing that worked before broke after adaptation)
+- **~1.546B** frozen base parameters, verified bit-for-bit unchanged throughout
+- **~2.18M** trainable LoRA parameters (**~0.141%** of the model)
+- **~8.75MB** adapter on disk (vs. ~2.9GB base model — about 330x smaller)
+
+See "Base vs. adapted comparison (Stage 6)" below for the full metric-by-metric breakdown, and "What this project demonstrates" / "Limitations" near the end for what these numbers do and don't support.
+
+## Architecture / data flow
+
+```mermaid
+flowchart TD
+    subgraph training["Training path (Stage 4)"]
+        T1["72 training examples<br/>(Stage 2)"] --> T2["Tokenization<br/>+ prompt/response masking"]
+        T2 --> T3["Frozen Qwen2.5-1.5B<br/>+ trainable LoRA adapter"]
+        T3 --> T4["Loss<br/>(target tokens only)"]
+        T4 --> T5["Backpropagation"]
+        T5 --> T6["LoRA parameter updates"]
+        T6 -.->|next batch| T3
+    end
+
+    subgraph evaluation["Evaluation path (Stages 3, 5, 6)"]
+        E1["24 held-out examples<br/>(Stage 2, never trained on)"] --> E2a["Frozen Qwen2.5-1.5B<br/>(base only — Stage 3)"]
+        E1 --> E2b["Frozen Qwen2.5-1.5B<br/>+ trained LoRA (Stage 5)"]
+        E2a --> E3a["Baseline outputs"]
+        E2b --> E3b["Adapted outputs"]
+        E3a --> E4["Deterministic scoring<br/>(6 metrics, shared code)"]
+        E3b --> E4
+        E4 --> E5["Baseline vs. adapted<br/>comparison (Stage 6)"]
+    end
+
+    subgraph inference["Inference path (Stage 7)"]
+        I1["Arbitrary context + question"] --> I2["Tokenizer<br/>(chat template)"]
+        I2 --> I3["Frozen Qwen2.5-1.5B<br/>+ trained LoRA"]
+        I3 --> I4["Generated ANSWER: ...<br/>CONFIDENCE: HIGH/LOW"]
+    end
+
+    T6 -.->|saved adapter| E2b
+    T6 -.->|saved adapter| I3
+```
+
+The same two frozen artifacts — the unmodified Qwen2.5-1.5B-Instruct base
+model and the ~8.75MB LoRA adapter trained once in Stage 4 — feed both the
+evaluation path and the inference path. Nothing downstream of Stage 4 ever
+changes the base model or the adapter.
 
 ## Project structure
 
@@ -44,7 +97,15 @@ small-model-adaptation/
 │   └── run_inference.py        #   Stage 7 — CLI / interactive / demo entry point
 ├── evaluation/                 # Stage 6 — compare base vs adapted outputs
 │   └── compare_models.py
-├── tests/                      # Stage 8 — automated tests for the pipeline
+├── tests/                      # Stage 8 — automated test suite (pytest)
+│   ├── conftest.py
+│   ├── test_dataset.py
+│   ├── test_baseline_scoring.py
+│   ├── test_evaluate_adapted_reuses_baseline.py
+│   ├── test_training_helpers.py
+│   ├── test_comparison.py
+│   ├── test_inference_interface.py
+│   └── test_run_inference_cli.py
 ├── reports/                    # Stage 3/6/7 outputs — metrics, comparisons, analysis (gitignored contents)
 ├── models/                     # Local model weights / adapter artifacts (gitignored contents)
 ├── requirements.txt
@@ -52,11 +113,12 @@ small-model-adaptation/
 └── README.md
 ```
 
-Stages 2-7 are implemented: `data_preparation/prepare_dataset.py`,
-`baseline_evaluation/run_baseline_eval.py`, `training/train.py`,
-`inference/evaluate_adapted.py` (Stage 5), `evaluation/compare_models.py`
-(Stage 6), and `inference/adapted_model.py` + `inference/run_inference.py`
-(Stage 7) — see below. Stage 8 (tests/docs) is not yet started.
+All 8 stages are implemented: `data_preparation/prepare_dataset.py`
+(Stage 2), `baseline_evaluation/run_baseline_eval.py` (Stage 3),
+`training/train.py` (Stage 4), `inference/evaluate_adapted.py` (Stage 5),
+`evaluation/compare_models.py` (Stage 6), `inference/adapted_model.py` +
+`inference/run_inference.py` (Stage 7), and `tests/` (Stage 8) — see
+below.
 
 Note: `inference/run_inference.py` originally held the Stage 5 evaluation
 script; that logic was renamed (unchanged) to `inference/evaluate_adapted.py`
@@ -71,34 +133,34 @@ and reproducible from the scripts in this repo.
 
 ## Local model availability
 
-No model has been downloaded or selected for this project yet. As a
-starting point for later stages, the local Hugging Face cache
-(`~/.cache/huggingface/hub`) already contains:
+The project was scoped from the start to reuse an already-cached model
+rather than download a new one. Before any model was selected, the local
+Hugging Face cache (`~/.cache/huggingface/hub`) was inspected and found to
+already contain:
 
-- `Qwen/Qwen2.5-1.5B-Instruct` (~2.9 GB) — a small instruction-tuned model, a plausible candidate for base/adapted comparison.
-- `sentence-transformers/all-MiniLM-L6-v2` — a small embedding model, potentially useful for evaluation/comparison metrics.
+- `Qwen/Qwen2.5-1.5B-Instruct` (~2.9 GB) — a small instruction-tuned model.
+- `sentence-transformers/all-MiniLM-L6-v2` — a small embedding model (not used by this project).
 
-No decision has been made to use either of these; they're noted here so
-later stages can reuse what's already local instead of downloading
-something new by default.
-
-As of Stage 3, `Qwen/Qwen2.5-1.5B-Instruct` has been selected as the
-model under test: its local cache was verified complete (all 7 files —
-config, tokenizer, and safetensors weights — resolve to existing,
-correctly sized blobs) and it has been loaded for evaluation. It was not
-re-downloaded.
+`Qwen/Qwen2.5-1.5B-Instruct` was selected as the model under test in
+Stage 3: its local cache was verified complete (all 7 files — config,
+tokenizer, and safetensors weights — resolve to existing, correctly sized
+blobs) and loaded from cache with `local_files_only=True` in every
+subsequent stage. It was never re-downloaded, and its weights are
+verified (by SHA-256 parameter fingerprint) to be unchanged at the end of
+every stage that touches it (Stages 3, 4, 5).
 
 ## Setup
 
 Dependencies are not installed by default (see `requirements.txt`).
 Stages that actually run the model (Stage 3 onward) need `torch` and
-`transformers` installed locally; Stage 4 (LoRA training) also needs
-`peft`. E.g. in a virtual environment:
+`transformers`; Stage 4 (LoRA training) and Stage 5/7 (loading the
+adapter) also need `peft`; Stage 8's test suite needs `pytest`. E.g. in a
+virtual environment:
 
 ```
 python3 -m venv .venv
 source .venv/bin/activate
-pip install torch transformers peft
+pip install torch transformers peft pytest
 ```
 
 `.venv/` is gitignored and not part of the committed project.
@@ -590,14 +652,115 @@ answer-extraction generalized less robustly than format/confidence.
    repeatedly (rather than reloading per question) is both far faster and
    is exactly what the `AdaptedModel` class is designed to make easy.
 
+## Testing and reproducibility (Stage 8)
+
+**Automated tests** live under `tests/` (pytest). They cover project code
+that doesn't require loading the ~2.9GB model — dataset structure and
+train/test separation, the exact training/held-out example format,
+Stage 3's parsing/matching/metric functions, the Stage 5→Stage 3
+scoring-reuse invariant (identity checks, not reimplementation), Stage 4's
+tokenization/masking/fingerprint helpers (using only the lightweight
+tokenizer), Stage 6's categorization/behavioral-breakdown/failure
+classification logic (on synthetic fixtures, never the frozen reports),
+prompt construction, and the Stage 7 inference interface — `AdaptedModel`
+and the CLI/interactive/demo wiring — driven entirely through stub
+tokenizer/model classes and a stub `AdaptedModel`, so no real weights are
+ever loaded during testing.
+
+Run:
+```
+source .venv/bin/activate
+python -m pytest tests/ -v
+```
+
+**Result:** 45 passed, 0 failed, in ~3.8s. No genuine bugs were found in
+the project code while writing these tests — every function behaved as
+its calling code already assumed.
+
+**Reproducibility, verified:**
+- `requirements.txt` lists every dependency actually used (`torch`,
+  `transformers`, `peft`, plus `pytest` for the test suite); nothing is
+  installed automatically — see "Setup" above.
+- `data/`, `models/`, and `reports/` hold only generated/downloaded
+  content and are gitignored aside from `.gitkeep`; `git ls-files` at the
+  end of Stage 8 contains only source code, `.gitkeep` placeholders,
+  `.gitignore`, `requirements.txt`, and `README.md` — no model weights,
+  no adapter, no dataset files, no `.venv/`, no `__pycache__/`.
+- Dataset generation (`data_preparation/prepare_dataset.py`) is fully
+  deterministic — no randomness at all, just fixed fact tables — so
+  regenerating it always produces the same 96 examples.
+- Fixed seeds are documented where randomness is actually used: Stage 4
+  training uses `SEED = 42` (Python's `random`, and `torch.manual_seed`);
+  Stages 3 and 5 decode greedily (`do_sample=False`), so a seed mainly
+  guards edge cases rather than driving the result.
+- **A fresh user with the cached base model available** could reproduce
+  the whole pipeline in order: `pip install -r requirements.txt` (plus
+  `peft`/`pytest`), `python3 data_preparation/prepare_dataset.py`,
+  `python3 baseline_evaluation/run_baseline_eval.py`,
+  `python3 training/train.py`, `python3 inference/evaluate_adapted.py`,
+  `python3 evaluation/compare_models.py`, then
+  `python3 inference/run_inference.py` for interactive use — each stage
+  reads only the previous stage's saved output plus the local model
+  cache, never anything from this specific run's memory.
+
+## What this project demonstrates
+
+- **Supervised fine-tuning** — training on (input, target-output) pairs
+  with a cross-entropy loss against the target tokens.
+- **Parameter-efficient fine-tuning (LoRA)** — adapting a model by
+  training small low-rank update matrices instead of all its weights.
+- **Frozen vs. trainable parameters** — ~1.546B parameters left exactly as
+  shipped; ~2.18M (0.141%) trained, verified by parameter fingerprinting,
+  not just by assumption.
+- **Gradient descent / backpropagation** — the actual mechanism (loss →
+  gradients → optimizer step) that moved the trainable parameters,
+  implemented as a plain PyTorch loop rather than hidden inside a
+  `Trainer`.
+- **Training loss** — what it measures (fit to the shown examples) and,
+  importantly, what it doesn't (generalization).
+- **Held-out evaluation** — keeping a test set completely untouched
+  through training so a later score means something.
+- **Memorization vs. generalization** — distinguished directly by testing
+  on subjects and phrasing the model never trained on, rather than by
+  assumption.
+- **Behavioral adaptation vs. knowledge acquisition** — training a
+  response *policy* (format, context-deference, abstention) on top of a
+  model that already had the relevant facts, and showing the base
+  model's knowledge never changed while its behavior did.
+- **Deterministic evaluation** — greedy decoding and frozen scoring rules
+  so the same inputs always produce the same measured result.
+- **Local open-source inference** — running a real open-weight model
+  entirely on local hardware, with no external API calls.
+
+## Limitations
+
+- **Tiny, synthetic dataset:** 72 train / 24 test examples, generated
+  from fixed templates across 6 domains — not naturally occurring data.
+- **Only 24 held-out examples:** far too few to statistically bound a
+  true error rate; 95.8% here is a point estimate on a small sample, not
+  a claim about real-world performance at that rate.
+- **Templated task structure:** every example is a short single-sentence
+  context plus one direct question; nothing tests long or multi-sentence
+  contexts, contradictory information, multi-hop reasoning, or
+  adversarial phrasing.
+- **One remaining, unfixed failure:** a semantic/question-interpretation
+  gap (a polar-shaped question answered "yes" instead of extracting the
+  requested entity) — documented in Stage 6, deliberately left unfixed.
+- **Small base model:** Qwen2.5-1.5B-Instruct is a small instruction-tuned
+  model chosen for local, fast iteration — results may not transfer to
+  much larger or differently-trained models.
+- **No claim of general-purpose grounding:** the evidence supports "this
+  LoRA adapter learned to answer/abstain/format based on supplied context
+  for inputs shaped like this dataset" — it does not support "the model
+  now has a general context-grounding capability" beyond this setup.
+
 ## Status
 
-**Step 7 / 8 — Usable adapted-model inference: done.**
+**Step 8 / 8 — Testing, documentation, and final wrap-up: done.**
 
-Steps 1-7 are complete: scaffolding, dataset, frozen baseline, LoRA
-training, held-out evaluation, side-by-side comparison, and now a local
-CLI/interactive/demo inference tool built on a reusable `AdaptedModel`
-class. No retraining, no adapter changes, no dataset changes, and no
-changes to the frozen Step 5 evaluation score.
-`requirements.txt` lists intended dependencies; `torch`, `transformers`,
-and `peft` are installed locally (in `.venv/`, gitignored).
+**Project Day 2 is complete.** All 8 stages are implemented: scaffolding,
+dataset, frozen baseline, LoRA adaptation, held-out evaluation, base vs.
+adapted comparison, local inference, and this final test suite +
+documentation pass. `requirements.txt` lists every dependency used;
+`torch`, `transformers`, `peft`, and `pytest` are installed locally (in
+`.venv/`, gitignored).
