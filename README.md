@@ -50,10 +50,10 @@ small-model-adaptation/
 └── README.md
 ```
 
-Stages 4-6 still contain only stub functions that raise
-`NotImplementedError`. `data_preparation/prepare_dataset.py` (Stage 2) and
-`baseline_evaluation/run_baseline_eval.py` (Stage 3) are implemented — see
-below.
+Stages 5-6 still contain only stub functions that raise
+`NotImplementedError`. `data_preparation/prepare_dataset.py` (Stage 2),
+`baseline_evaluation/run_baseline_eval.py` (Stage 3), and
+`training/train.py` (Stage 4) are implemented — see below.
 
 `data/`, `models/`, and `reports/` hold generated or downloaded content
 (datasets, model weights, checkpoints, evaluation results). Their
@@ -83,12 +83,13 @@ re-downloaded.
 
 Dependencies are not installed by default (see `requirements.txt`).
 Stages that actually run the model (Stage 3 onward) need `torch` and
-`transformers` installed locally, e.g. in a virtual environment:
+`transformers` installed locally; Stage 4 (LoRA training) also needs
+`peft`. E.g. in a virtual environment:
 
 ```
 python3 -m venv .venv
 source .venv/bin/activate
-pip install torch transformers
+pip install torch transformers peft
 ```
 
 `.venv/` is gitignored and not part of the committed project.
@@ -190,13 +191,71 @@ truth even when it conflicts with the model's own knowledge, and (3)
 tagging CONFIDENCE consistently with whether the context actually
 supported the answer.
 
+## Model adaptation (Stage 4)
+
+`training/train.py` trains a LoRA adapter on the 72 Stage 2 TRAIN examples
+only — the 24 held-out test examples are never read by this script. Before
+training it re-verifies the base model cache is complete and loads it with
+`local_files_only=True` (a hard guarantee against ever downloading a
+model). Base model weights are frozen throughout; only small LoRA
+matrices are trained.
+
+**Configuration** (conservative, chosen for a 72-example behavioral
+dataset on a single Mac):
+
+| Setting | Value | Why |
+|---|---|---|
+| LoRA rank (r) | 8 | Enough capacity for a narrow behavioral shift, not a new capability — keeps trainable parameters minimal and limits overfitting on 72 examples. |
+| LoRA alpha | 16 | 2x-rank scaling (standard default) — a moderate update magnitude relative to the frozen weights. |
+| LoRA dropout | 0.05 | Light regularization suited to a very small dataset. |
+| Target modules | `q_proj, k_proj, v_proj, o_proj` | Attention projections only, not the MLP blocks — changing how the model weighs supplied context vs. its own knowledge is exactly the attention mechanism's job; skipping MLP keeps the adapter small and the change conservative. |
+| Learning rate | 2e-4 | Typical for LoRA SFT on small instruction-tuned models; safe because frozen base weights can't be destabilized. |
+| Epochs | 6 (54 optimizer steps) | Enough repetition for the model to pick up a simple, repeated output structure without excessive passes over 72 examples. |
+| Effective batch size | 8 (4 per-device x 2 grad-accum steps) | Matched to a 72-example dataset (9 optimizer steps/epoch). |
+| Trainable parameters | 2,179,072 / 1,545,893,376 (0.141%) | Confirms this is parameter-efficient fine-tuning, not full-model fine-tuning. |
+
+Training is a plain PyTorch loop (no `Trainer`), so every step — batching,
+loss masking (loss is only computed on the `ANSWER:`/`CONFIDENCE:` target
+tokens, not the prompt), backward pass, gradient accumulation, optimizer
+step — is visible in the script rather than hidden by a framework. Seed
+is fixed (42) for reproducibility.
+
+**Training run:** finished in ~593s (~10 min) on this Mac (MPS backend).
+Per-epoch average loss fell monotonically every epoch:
+
+```
+epoch 1: 1.8687
+epoch 2: 0.1258
+epoch 3: 0.0041
+epoch 4: 0.0006
+epoch 5: 0.0002
+epoch 6: 0.0001
+```
+
+**Post-training verification:**
+- Base model parameter fingerprint (SHA-256 over every non-LoRA weight tensor) — identical before and after training. The base model was never modified.
+- Adapter saved to `models/qwen2.5-1.5b-instruct-lora-behavior-adapter/` (gitignored, like all generated model artifacts): `adapter_model.safetensors` is **8.75 MB**, vs. the ~2.9 GB base model — roughly **330x smaller**, about 0.3% of the base model's size.
+- Smoke test: reloaded a *fresh* copy of the base model from cache, attached the saved adapter to it (proving save/load round-trips correctly), and ran it on one **training** example. Output exactly matched the expected target: `ANSWER: Paris\nCONFIDENCE: HIGH`. (This is a sanity check only — it is a training example, not evidence of generalization, and the 24-example held-out test set was deliberately not touched.)
+
+**Plain-English summary:**
+
+- **What LoRA changed:** a small pair of low-rank matrices bolted onto the attention projections (q/k/v/o) in each of the 28 transformer layers — about 2.2M new parameters (0.14% the size of the base model). These are the only weights that received gradient updates.
+- **What remained frozen:** all ~1.546B original Qwen2.5-1.5B-Instruct parameters — every weight the model shipped with, unchanged, verified by an exact fingerprint match before and after training.
+- **What gradient descent was doing:** for each training example, computing how far the model's predicted next-token probabilities were from the actual `ANSWER: .../CONFIDENCE: ...` target tokens, then nudging the LoRA matrices (only) to make the correct tokens more likely next time.
+- **What training loss means:** the cross-entropy between the model's predicted token distribution and the actual target tokens over the 72 training examples — lower means the model assigns higher probability to reproducing exactly those target sequences.
+- **Why a falling loss doesn't prove generalization:** loss here measures how well the model reproduces the *specific 72 training answers* it was shown repeatedly (6 epochs). A model can drive this loss to near zero by memorizing those 72 input→output pairs directly, without having learned the underlying *policy* ("use only the context," "abstain when insufficient," "use this format") in a way that transfers to new subjects and new phrasing. The loss curve alone can't distinguish memorization from generalization.
+- **Why we deliberately have not looked at held-out performance yet:** that's the entire point of keeping the 24 test examples untouched through training — it's the only way to test whether the model generalized rather than memorized. Peeking now, even informally, would contaminate the experiment: Stage 5/6 needs a clean first look at test performance to mean anything.
+- **How much smaller the adapter is:** ~8.75 MB vs. ~2.9 GB for the base model — about 330x smaller, so the "adaptation" that ships is a tiny patch on top of an unmodified base model, not a new model.
+
 ## Status
 
-**Step 3 / 8 — Base-model evaluation: done.**
+**Step 4 / 8 — Model adaptation / training: done.**
 
-Steps 1 (scaffolding), 2 (dataset), and 3 (baseline evaluation) are
-complete. No training has occurred and no model weights have been
-modified — Stage 3 only ran inference on the frozen base model.
+Steps 1 (scaffolding), 2 (dataset), 3 (baseline evaluation), and 4 (LoRA
+training) are complete. The base model has not been modified — only a
+small LoRA adapter was trained and saved. The 24 held-out test examples
+have still never been used for training, gradient updates, or evaluation;
+that is reserved for Step 5.
 `requirements.txt` lists intended dependencies; `torch` and
 `transformers` are now installed locally (in `.venv/`, gitignored) to
 run the baseline, but no adapter or fine-tuned checkpoint exists yet.
