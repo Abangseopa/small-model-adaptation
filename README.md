@@ -50,11 +50,10 @@ small-model-adaptation/
 └── README.md
 ```
 
-Stage 6 (`evaluation/compare_models.py`) still contains only a stub
-function that raises `NotImplementedError`. Stages 2-5 —
-`data_preparation/prepare_dataset.py`, `baseline_evaluation/run_baseline_eval.py`,
-`training/train.py`, and `inference/run_inference.py` — are implemented,
-see below.
+Stages 2-6 are implemented: `data_preparation/prepare_dataset.py`,
+`baseline_evaluation/run_baseline_eval.py`, `training/train.py`,
+`inference/run_inference.py`, and `evaluation/compare_models.py` — see
+below. Stages 7-8 (analysis write-up, tests/docs) are not yet started.
 
 `data/`, `models/`, and `reports/` hold generated or downloaded content
 (datasets, model weights, checkpoints, evaluation results). Their
@@ -347,14 +346,128 @@ exist) to reproduce. Results are written to
 `reports/adapted_eval_results.jsonl`, `reports/adapted_eval_metrics.json`,
 and `reports/baseline_vs_adapted.json` (all gitignored, same as Stage 3).
 
+## Base vs. adapted comparison (Stage 6)
+
+`evaluation/compare_models.py` runs no model and touches no dataset — it
+only reads the already-frozen Step 3 (`reports/baseline_eval_results.jsonl`)
+and Step 5 (`reports/adapted_eval_results.jsonl`) artifacts and analyzes
+them side by side. It never recomputes the evaluation and never redefines
+the six scoring metrics.
+
+**Per-example categorization** (24/24 held-out examples):
+
+| Category | Count | Meaning |
+|---|---|---|
+| Improved | 23 | Baseline failed, adapted passed |
+| Unchanged success | 0 | Both passed |
+| Unchanged failure | 1 | Both failed |
+| Regressed | 0 | Baseline passed, adapted failed |
+
+Zero regressions: nothing the base model already did correctly broke
+after adaptation.
+
+**Comparison table:**
+
+| Behavior | Base model | Adapted model | Interpretation |
+|---|---|---|---|
+| Answer accuracy | 0.0% | 95.8% | Core fact/abstention text extracted, right or wrong |
+| Confidence accuracy | 0.0% | 100.0% | HIGH/LOW tagged correctly given actual context sufficiency |
+| Format compliance | 0.0% | 100.0% | Literal ANSWER:/CONFIDENCE: structure produced at all |
+| Answerable-example accuracy | 0.0% | 91.7% | Answer accuracy where context did support an answer |
+| Unanswerable-example accuracy | 0.0% | 100.0% | Correctly abstained instead of guessing |
+| Full-behavior success | 0.0% | 95.8% | Answer + confidence + format all correct at once |
+
+**Behavioral breakdown:**
+
+- **A. Format learning** — 0% → 100% format compliance. The adapter fully
+  learned to emit the literal two-line structure on every held-out example.
+- **B. Abstention / grounding** — on the 12 deliberately insufficient-context
+  test examples, both answer accuracy and confidence accuracy went 0% →
+  100%. The model learned to defer to the supplied context over its own
+  prior knowledge (recall from Step 3 it sometimes answered from pretrained
+  knowledge, e.g. Uranus's orbital position, even when the context withheld it) —
+  the adapted model consistently abstains instead.
+- **C. Answer extraction** — on the 12 answerable examples, answer accuracy
+  went 0% → 91.7% (11/12). The one shortfall is the literature failure
+  analyzed below.
+- **D. Confidence policy** — confidence accuracy went 0% → 100% overall,
+  including on the one example where the *answer* was wrong: the model
+  correctly tagged `CONFIDENCE: HIGH` for the Crime and Punishment question
+  even though it extracted the wrong answer content. This shows the
+  confidence policy tracks context sufficiency independently of whether the
+  specific answer text was extracted correctly — it's a separate, and more
+  robust, sub-skill than answer extraction itself.
+
+**The one remaining failure, analyzed:**
+
+```
+Question: Do you know who authored "Crime and Punishment"?
+Expected: ANSWER: Fyodor Dostoevsky / CONFIDENCE: HIGH
+Adapted:  ANSWER: yes / CONFIDENCE: HIGH
+```
+
+Classified as a **semantic/question-interpretation failure**, not a
+formatting, confidence, or retrieval failure: the format is exactly
+correct, and `CONFIDENCE: HIGH` is exactly correct (the model correctly
+judged the context sufficient). What failed is question interpretation —
+"Do you know who authored X?" is a polar (yes/no-shaped) question on its
+surface, and the model answered that surface shape literally ("yes")
+instead of resolving what entity the question is actually requesting. Two
+of the three learned sub-skills (format, grounding/confidence) transferred
+to this novel phrasing; the third (semantic answer extraction) did not, on
+this particular phrasing. Not fixed here — that would require retraining
+or dataset changes, out of scope for Step 6.
+
+**Plain-English summary:**
+
+- **What the adapter learned:** a response *policy*, not new facts — always
+  emit the ANSWER:/CONFIDENCE: structure, set confidence by whether the
+  supplied context (not the model's own knowledge) supports an answer, and
+  extract a concise answer or the fixed abstention phrase instead of prose.
+- **Evidence for generalization, not memorization:** all 24 test examples
+  used subjects never seen during training, and most used question phrasing
+  never seen either. Memorizing 72 specific training pairs gives the model
+  no mechanism to succeed on inputs it never received gradient updates for
+  — yet full-behavior success went from 0/24 to 23/24. That pattern is
+  what generalization of a learned policy looks like, not what memorization
+  looks like.
+- **What the remaining failure teaches us:** the three sub-skills (format,
+  grounding/confidence, answer extraction) generalized with different
+  robustness. Format and confidence-tagging held up even on the phrasing
+  that differs most from training; precise semantic extraction did not, on
+  that same input. The adapter looks like it learned "recognize this task
+  shape, respond in this structure, gauge context sufficiency" more robustly
+  than a deeper natural-language-understanding upgrade.
+- **Why 95.8% here doesn't mean 95.8% in the real world:** 24 examples is
+  too small to bound a true error rate with any statistical confidence, the
+  set is fully synthetic and templated (short single-sentence contexts, 6
+  domains, one alternate phrasing each), and it was designed to test one
+  narrow behavior change — not to represent real-world question/context
+  diversity (multi-sentence contexts, contradictions, adversarial phrasing,
+  multi-hop reasoning, none of which this dataset covers).
+- **Knowledge vs. behavioral policy:** the base model already "knew" nearly
+  every fact in this dataset before training (Step 3 often got the fact
+  right in prose). LoRA training didn't add or change any factual knowledge
+  — the base model's ~1.546B parameters are verified bit-for-bit unchanged
+  throughout. What changed is a separate, tiny policy layer (2.18M LoRA
+  parameters, 0.14% of the model) governing *how* the model is willing to
+  respond — not *what it knows*.
+
+Run `python3 evaluation/compare_models.py` (no model loading, needs Steps
+3 and 5's saved reports) to reproduce. Results are written to
+`reports/model_comparison_results.jsonl` (per-example) and
+`reports/model_comparison_summary.json` (categorization, breakdown,
+failure analysis), both gitignored.
+
 ## Status
 
-**Step 5 / 8 — Adapted-model held-out evaluation: done.**
+**Step 6 / 8 — Base vs. adapted comparison: done.**
 
-Steps 1-5 are complete: scaffolding, dataset, frozen baseline, LoRA
-training, and now the first (and only) held-out evaluation of the
-adapted model, scored under the exact same protocol and metrics as the
-baseline. No retraining or hyperparameter changes were made in response
-to these results, and the dataset/test set were not touched.
+Steps 1-6 are complete: scaffolding, dataset, frozen baseline, LoRA
+training, held-out evaluation of the adapted model, and now a side-by-side
+analysis of the two frozen result sets. No retraining, dataset changes, or
+adapter changes were made in Step 6 — it is read-only analysis of
+already-generated artifacts.
 `requirements.txt` lists intended dependencies; `torch`, `transformers`,
-and `peft` are installed locally (in `.venv/`, gitignored).
+and `peft` are installed locally (in `.venv/`, gitignored). Step 6 itself
+needs none of them — it only reads JSON.
