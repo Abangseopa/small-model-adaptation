@@ -50,10 +50,11 @@ small-model-adaptation/
 └── README.md
 ```
 
-Stages 5-6 still contain only stub functions that raise
-`NotImplementedError`. `data_preparation/prepare_dataset.py` (Stage 2),
-`baseline_evaluation/run_baseline_eval.py` (Stage 3), and
-`training/train.py` (Stage 4) are implemented — see below.
+Stage 6 (`evaluation/compare_models.py`) still contains only a stub
+function that raises `NotImplementedError`. Stages 2-5 —
+`data_preparation/prepare_dataset.py`, `baseline_evaluation/run_baseline_eval.py`,
+`training/train.py`, and `inference/run_inference.py` — are implemented,
+see below.
 
 `data/`, `models/`, and `reports/` hold generated or downloaded content
 (datasets, model weights, checkpoints, evaluation results). Their
@@ -247,15 +248,113 @@ epoch 6: 0.0001
 - **Why we deliberately have not looked at held-out performance yet:** that's the entire point of keeping the 24 test examples untouched through training — it's the only way to test whether the model generalized rather than memorized. Peeking now, even informally, would contaminate the experiment: Stage 5/6 needs a clean first look at test performance to mean anything.
 - **How much smaller the adapter is:** ~8.75 MB vs. ~2.9 GB for the base model — about 330x smaller, so the "adaptation" that ships is a tiny patch on top of an unmodified base model, not a new model.
 
+## Adapted-model held-out evaluation (Stage 5)
+
+`inference/run_inference.py` attaches the Stage 4 LoRA adapter to a
+freshly loaded copy of the base model and runs it — for the first time —
+on the exact same 24 Stage 2 held-out test examples used for the Stage 3
+baseline. It deliberately imports its parsing/matching/metric functions
+from `baseline_evaluation.run_baseline_eval` rather than redefining them,
+and loads Stage 3's *saved* results rather than recomputing them, so the
+baseline stays the frozen comparison point and the six metrics are
+scored identically for both models.
+
+Before scoring, the script verifies: the loaded base model's parameter
+fingerprint matches the one recorded during the Stage 3 baseline run
+exactly (same weights); the adapter reports `active_adapters == ['default']`;
+a fingerprint over every non-LoRA parameter is identical before, halfway
+through, and after inference (base model never touched); the adapter
+files on disk are byte-for-byte unchanged after the run (nothing was
+merged or overwritten); and all 24 examples were evaluated exactly once
+(no duplicates, no reordering-induced skips).
+
+**Results — Baseline vs. Adapted (24/24 held-out test examples):**
+
+| Metric | Baseline | Adapted | Change |
+|---|---|---|---|
+| Answer accuracy | 0.0% | 95.8% | +95.8pp |
+| Confidence accuracy | 0.0% | 100.0% | +100.0pp |
+| Format compliance | 0.0% | 100.0% | +100.0pp |
+| Answerable-example accuracy | 0.0% | 91.7% | +91.7pp |
+| Unanswerable-example accuracy | 0.0% | 100.0% | +100.0pp |
+| Full-behavior success | 0.0% | 95.8% | +95.8pp |
+
+23 of 24 test examples improved from failure to full success; 1 remains
+a failure. Representative examples:
+
+**Answerable, fixed (Kenya/geography, novel subject + novel phrasing):**
+```
+Context: Kenya is a country. Its capital city is Nairobi.
+Question: Can you tell me which city serves as the capital of Kenya?
+Expected: ANSWER: Nairobi / CONFIDENCE: HIGH
+Baseline: "Nairobi serves as the capital of Kenya."                    [FAIL — wrong format]
+Adapted:  "ANSWER: Nairobi\nCONFIDENCE: HIGH"                          [PASS]
+```
+
+**Unanswerable, fixed (same subject, deliberately insufficient context):**
+```
+Context: A record exists for: Kenya. No additional detail is available.
+Question: Can you tell me which city serves as the capital of Kenya?
+Expected: ANSWER: Insufficient information to answer. / CONFIDENCE: LOW
+Baseline: "The context provided states that there is a record for Kenya but no
+           additional details... [long prose, no format]"              [FAIL]
+Adapted:  "ANSWER: Insufficient information to answer.\nCONFIDENCE: LOW" [PASS]
+```
+
+**Remaining failure (the one example still wrong):**
+```
+Context: The book "Crime and Punishment" was written by Fyodor Dostoevsky.
+Question: Do you know who authored "Crime and Punishment"?
+Expected: ANSWER: Fyodor Dostoevsky / CONFIDENCE: HIGH
+Baseline: 'Yes, I know that "Crime and Punishment" was written by Fyodor Dostoevsky.' [FAIL — no format]
+Adapted:  "ANSWER: yes\nCONFIDENCE: HIGH"                              [FAIL — right format, wrong content]
+```
+This is the literature domain's alternate test-question phrasing ("Do you
+know who authored...?" — a yes/no-shaped question). The adapted model
+correctly adopted the format and a HIGH confidence, but literally
+answered the yes/no question ("yes") instead of extracting the author
+name the underlying question actually wants — a real generalization gap
+on a phrasing the model never saw as training data.
+
+**Did it generalize, or memorize?** These 24 examples received zero
+gradient updates during Stage 4 training — different subjects than
+training (Kenya/Norway/Uranus/Neptune/etc. vs. France/Japan/Mars/etc.),
+and for every domain, different question phrasing on top of that. Going
+from 0% to 95.8% full-behavior success on inputs the model never trained
+on is evidence *for* generalization of the answer/abstain/format policy,
+not mere memorization of the 72 training pairs — memorization alone
+predicts near-baseline failure here, not near-perfect success.
+
+What this does **not** prove: the dataset is small, synthetic, and
+templated — a handful of fixed sentence patterns per domain, with the
+test split varying only the subject and one alternate phrasing, not the
+underlying structure. The model may have generalized the *template*
+(recognize this sentence shape, emit this two-line format, look for a
+factoid near the question's keyword) rather than a deep, general
+context-grounding skill that would hold up on genuinely novel phrasing
+structures, multi-sentence contexts, or adversarial context/question
+mismatches — the one remaining failure (misreading a yes/no-shaped
+question) is itself a hint of exactly that limitation. A 24-example test
+set is also far too small to tightly bound the true error rate. The
+honest claim this result supports is: *the LoRA adapter generalized the
+target behavior across novel subjects and (mostly) novel phrasing within
+this dataset's format* — not that the model acquired a general-purpose
+context-grounding capability that would transfer beyond this synthetic
+setup.
+
+Run `python3 inference/run_inference.py` (needs Stage 4's adapter to
+exist) to reproduce. Results are written to
+`reports/adapted_eval_results.jsonl`, `reports/adapted_eval_metrics.json`,
+and `reports/baseline_vs_adapted.json` (all gitignored, same as Stage 3).
+
 ## Status
 
-**Step 4 / 8 — Model adaptation / training: done.**
+**Step 5 / 8 — Adapted-model held-out evaluation: done.**
 
-Steps 1 (scaffolding), 2 (dataset), 3 (baseline evaluation), and 4 (LoRA
-training) are complete. The base model has not been modified — only a
-small LoRA adapter was trained and saved. The 24 held-out test examples
-have still never been used for training, gradient updates, or evaluation;
-that is reserved for Step 5.
-`requirements.txt` lists intended dependencies; `torch` and
-`transformers` are now installed locally (in `.venv/`, gitignored) to
-run the baseline, but no adapter or fine-tuned checkpoint exists yet.
+Steps 1-5 are complete: scaffolding, dataset, frozen baseline, LoRA
+training, and now the first (and only) held-out evaluation of the
+adapted model, scored under the exact same protocol and metrics as the
+baseline. No retraining or hyperparameter changes were made in response
+to these results, and the dataset/test set were not touched.
+`requirements.txt` lists intended dependencies; `torch`, `transformers`,
+and `peft` are installed locally (in `.venv/`, gitignored).
