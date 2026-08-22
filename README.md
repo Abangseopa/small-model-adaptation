@@ -50,9 +50,10 @@ small-model-adaptation/
 └── README.md
 ```
 
-Stages 3-6 still contain only stub functions that raise
-`NotImplementedError`. `data_preparation/prepare_dataset.py` (Stage 2)
-is implemented — see below.
+Stages 4-6 still contain only stub functions that raise
+`NotImplementedError`. `data_preparation/prepare_dataset.py` (Stage 2) and
+`baseline_evaluation/run_baseline_eval.py` (Stage 3) are implemented — see
+below.
 
 `data/`, `models/`, and `reports/` hold generated or downloaded content
 (datasets, model weights, checkpoints, evaluation results). Their
@@ -71,6 +72,26 @@ starting point for later stages, the local Hugging Face cache
 No decision has been made to use either of these; they're noted here so
 later stages can reuse what's already local instead of downloading
 something new by default.
+
+As of Stage 3, `Qwen/Qwen2.5-1.5B-Instruct` has been selected as the
+model under test: its local cache was verified complete (all 7 files —
+config, tokenizer, and safetensors weights — resolve to existing,
+correctly sized blobs) and it has been loaded for evaluation. It was not
+re-downloaded.
+
+## Setup
+
+Dependencies are not installed by default (see `requirements.txt`).
+Stages that actually run the model (Stage 3 onward) need `torch` and
+`transformers` installed locally, e.g. in a virtual environment:
+
+```
+python3 -m venv .venv
+source .venv/bin/activate
+pip install torch transformers
+```
+
+`.venv/` is gitignored and not part of the committed project.
 
 ## Dataset (Stage 2)
 
@@ -110,11 +131,72 @@ Current dataset: 96 examples total — 72 train (36 answerable / 36
 unanswerable) and 24 held-out test (12 / 12), evenly split across the 6
 domains.
 
+## Baseline evaluation (Stage 3)
+
+`baseline_evaluation/run_baseline_eval.py` loads the unmodified,
+locally-cached `Qwen/Qwen2.5-1.5B-Instruct` and runs it, zero-shot, over
+all 24 Stage 2 held-out test examples. "Zero-shot" here means the prompt
+states the task rules (answer only from the supplied context, use the
+ANSWER/CONFIDENCE format, say so if the context is insufficient) but
+contains no worked examples of that behavior — the model has to follow
+the instructions from a plain description alone, exactly as it would
+need to for the adapted model comparison in Stage 6.
+
+Decoding is greedy (`do_sample=False`, `num_beams=1`) for reproducibility.
+Parameter integrity is verified with a SHA-256 fingerprint over every
+named parameter tensor, taken before, halfway through, and after the run
+— all three matched, confirming the base model was never modified.
+
+Run `python3 baseline_evaluation/run_baseline_eval.py` (needs the Stage 3
+`venv` from Setup above) to reproduce. Results are written to
+`reports/baseline_eval_results.jsonl` (per-example) and
+`reports/baseline_eval_metrics.json` (aggregate), both gitignored.
+
+**Baseline results (24/24 test examples):**
+
+| Metric | Value |
+|---|---|
+| Answer accuracy | 0.0% |
+| Confidence accuracy | 0.0% |
+| Format compliance | 0.0% |
+| Answerable-example accuracy | 0.0% |
+| Unanswerable-example accuracy | 0.0% |
+| Full-behavior success | 0.0% |
+
+The base model never emits the literal `ANSWER: ...` / `CONFIDENCE: ...`
+format, so every strict metric reads 0% — but the raw responses show its
+actual behavior is more mixed than that number implies:
+
+- It usually *does* answer correctly, in prose (e.g. "Nairobi serves as
+  the capital of Kenya.").
+- On some deliberately insufficient-context examples it correctly
+  recognizes it can't answer (e.g. Norway/Kenya capital, invention
+  dates, dish origins) — but still doesn't use the required format or
+  confidence tag.
+- On others it **ignores the instruction to use only the supplied
+  context** and answers from its own pretrained knowledge instead — e.g.
+  given only "Notes reference: Uranus. No further detail was recorded."
+  it still answers "Uranus occupies the 7th position..." That's the
+  clearest baseline failure: the behavior we actually want to adapt is
+  "defer to the supplied context over prior knowledge," and the base
+  model doesn't reliably do that.
+
+This baseline must be recorded now, before any training, because Stage 6
+can only claim adaptation "changed behavior" by comparing the adapted
+model's outputs to this exact frozen reference point on this exact test
+set. Stage 4 should specifically target: (1) emitting the literal
+ANSWER/CONFIDENCE format, (2) treating context as the sole source of
+truth even when it conflicts with the model's own knowledge, and (3)
+tagging CONFIDENCE consistently with whether the context actually
+supported the answer.
+
 ## Status
 
-**Step 2 / 8 — Dataset and training examples: done.**
+**Step 3 / 8 — Base-model evaluation: done.**
 
-Step 1 (scaffolding) and Step 2 (dataset) are complete. Nothing has
-been installed, downloaded, or trained yet — no model has been loaded,
-and no baseline evaluation has been run. `requirements.txt` lists
-intended dependencies but none are installed.
+Steps 1 (scaffolding), 2 (dataset), and 3 (baseline evaluation) are
+complete. No training has occurred and no model weights have been
+modified — Stage 3 only ran inference on the frozen base model.
+`requirements.txt` lists intended dependencies; `torch` and
+`transformers` are now installed locally (in `.venv/`, gitignored) to
+run the baseline, but no adapter or fine-tuned checkpoint exists yet.
