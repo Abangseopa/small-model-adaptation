@@ -1,0 +1,23 @@
+# Small Model Adaptation — dependencies
+#
+# Not installed yet (Step 1 is scaffolding only). Grouped by the pipeline
+# stage that will need them.
+
+# Stage 2-6: model loading, adaptation (LoRA), datasets
+torch
+transformers
+peft
+datasets
+accelerate
+
+# Stage 3/6: evaluation metrics
+evaluate
+scikit-learn
+
+# General utilities
+numpy
+pandas
+tqdm
+
+# Stage 8: tests
+pytest

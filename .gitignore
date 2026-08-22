@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+.mypy_cache/
+.pytest_cache/
+
+# OS
+.DS_Store
+
+# Environment / secrets
+.env
+
+# Stage 2: generated/downloaded datasets
+data/raw/*
+data/processed/*
+!data/raw/.gitkeep
+!data/processed/.gitkeep
+
+# Stage 4: local model weights, adapters, and checkpoints
+models/*
+!models/.gitkeep
+
+# Stage 3/6/7: generated evaluation results, metrics, and reports
+reports/*
+!reports/.gitkeep
+
+# Model / training artifacts, wherever they end up
+*.safetensors
+*.bin
+*.pt
+*.ckpt
+checkpoints/
